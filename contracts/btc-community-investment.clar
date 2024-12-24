@@ -96,3 +96,104 @@
             (<= desc-length max-description-length)
             (not (is-eq description "")))))
 
+;; Validate project ID
+(define-private (is-valid-project-id (project-id uint))
+    (and 
+        (> project-id u0)
+        (<= project-id (var-get project-counter))))
+
+;; Validate investment amount
+(define-private (is-valid-amount (amount uint))
+    (and 
+        (> amount u0)
+        (>= amount min-investment)
+        (<= amount max-investment)))
+
+;; Check if project is active
+(define-private (is-project-active (project-id uint))
+    (match (map-get? projects { project-id: project-id })
+        project (is-eq (get status project) "active")
+        false))
+
+;; Create or update vote counts with validation
+(define-private (set-vote-counts (project-id uint))
+    (begin
+        (asserts! (is-valid-project-id project-id) ERR-INVALID-PROJECT-ID)
+        (ok (map-set vote-counts
+            { project-id: project-id }
+            {
+                total-votes: u0,
+                positive-votes: u0,
+                negative-votes: u0,
+                last-updated: stacks-block-height
+            }))))
+
+;; Public Functions
+
+;; Create a new project with validation
+(define-public (create-project 
+    (title (string-ascii 50)) 
+    (description (string-ascii 500))
+    (funding-goal uint))
+    (begin
+        (asserts! (is-valid-title title) ERR-INVALID-TITLE)
+        (asserts! (is-valid-description description) ERR-INVALID-DESCRIPTION)
+        (asserts! (is-valid-amount funding-goal) ERR-INVALID-AMOUNT)
+
+        (let ((project-id (+ (var-get project-counter) u1)))
+            (begin
+                (map-set projects 
+                    { project-id: project-id }
+                    {
+                        creator: tx-sender,
+                        title: title,
+                        description: description,
+                        funding-goal: funding-goal,
+                        current-amount: u0,
+                        status: "active",
+                        end-block: (+ stacks-block-height voting-period),
+                        creation-block: stacks-block-height,
+                        last-updated: stacks-block-height
+                    })
+                (map-set project-titles
+                    { title: title }
+                    { exists: true })
+                (try! (set-vote-counts project-id))
+                (var-set project-counter project-id)
+                (ok project-id)))))
+
+;; Invest in a project with validation
+(define-public (invest (project-id uint) (amount uint))
+    (begin
+        (asserts! (is-valid-project-id project-id) ERR-INVALID-PROJECT-ID)
+        (asserts! (is-valid-amount amount) ERR-INVALID-AMOUNT)
+        (asserts! (is-project-active project-id) ERR-PROJECT-INACTIVE)
+
+        (let ((project (unwrap! (map-get? projects { project-id: project-id })
+                               ERR-PROJECT-NOT-FOUND))
+              (current-investment (default-to 
+                                    { amount: u0, timestamp: u0, last-updated: u0 }
+                                    (map-get? investments 
+                                        { project-id: project-id, investor: tx-sender }))))
+            (asserts! (< (+ amount (get current-amount project)) max-investment)
+                     ERR-MAX-INVESTMENT-EXCEEDED)
+            (asserts! (< stacks-block-height (get end-block project))
+                     ERR-PROJECT-EXPIRED)
+
+            (begin
+                (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+                (map-set projects 
+                    { project-id: project-id }
+                    (merge project 
+                        { 
+                            current-amount: (+ (get current-amount project) amount),
+                            last-updated: stacks-block-height
+                        }))
+                (map-set investments 
+                    { project-id: project-id, investor: tx-sender }
+                    { 
+                        amount: (+ amount (get amount current-investment)),
+                        timestamp: stacks-block-height,
+                        last-updated: stacks-block-height
+                    })
+                (ok true)))))
