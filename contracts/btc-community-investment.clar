@@ -197,3 +197,77 @@
                         last-updated: stacks-block-height
                     })
                 (ok true)))))
+
+;; Vote on a project with validation
+(define-public (vote (project-id uint) (vote-value bool))
+    (begin
+        (asserts! (is-valid-project-id project-id) ERR-INVALID-PROJECT-ID)
+        (asserts! (is-project-active project-id) ERR-PROJECT-INACTIVE)
+
+        (let ((project (unwrap! (map-get? projects { project-id: project-id })
+                               ERR-PROJECT-NOT-FOUND))
+              (investment (unwrap! (map-get? investments 
+                                    { project-id: project-id, investor: tx-sender })
+                                 ERR-NOT-AUTHORIZED))
+              (current-counts (unwrap! (map-get? vote-counts { project-id: project-id })
+                                     ERR-PROJECT-NOT-FOUND)))
+            (asserts! (is-none (map-get? votes 
+                                { project-id: project-id, voter: tx-sender }))
+                     ERR-ALREADY-VOTED)
+            (begin
+                (map-set votes 
+                    { project-id: project-id, voter: tx-sender }
+                    { 
+                        vote: vote-value,
+                        timestamp: stacks-block-height
+                    })
+                (map-set vote-counts
+                    { project-id: project-id }
+                    {
+                        total-votes: (+ (get total-votes current-counts) u1),
+                        positive-votes: (+ (get positive-votes current-counts) 
+                                         (if vote-value u1 u0)),
+                        negative-votes: (+ (get negative-votes current-counts) 
+                                         (if vote-value u0 u1)),
+                        last-updated: stacks-block-height
+                    })
+                (ok true)))))
+
+
+;; Get project details
+(define-read-only (get-project (project-id uint))
+    (map-get? projects { project-id: project-id }))
+
+;; Get investment amount for a specific investor
+(define-read-only (get-investment (project-id uint) (investor principal))
+    (map-get? investments { project-id: project-id, investor: investor }))
+
+;; Get vote for a specific voter
+(define-read-only (get-vote (project-id uint) (voter principal))
+    (map-get? votes { project-id: project-id, voter: voter }))
+
+;; Get vote counts for a project
+(define-read-only (get-vote-counts (project-id uint))
+    (map-get? vote-counts { project-id: project-id }))
+
+;; Finalize project after voting period
+(define-public (finalize-project (project-id uint))
+    (let ((project (unwrap! (map-get? projects { project-id: project-id })
+                           ERR-PROJECT-NOT-FOUND))
+          (counts (unwrap! (map-get? vote-counts { project-id: project-id })
+                          ERR-PROJECT-NOT-FOUND)))
+        (if (>= stacks-block-height (get end-block project))
+            (begin
+                (if (>= (get total-votes counts) min-vote-threshold)
+                    (map-set projects { project-id: project-id }
+                        (merge project {
+                            status: (if (> (get positive-votes counts) 
+                                        (get negative-votes counts))
+                                    "approved"
+                                    "rejected")
+                        }))
+                    (map-set projects { project-id: project-id }
+                        (merge project { status: "failed" })))
+                (ok true))
+            ERR-PROJECT-EXPIRED)))
+
